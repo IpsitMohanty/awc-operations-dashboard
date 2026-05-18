@@ -1,0 +1,26 @@
+{
+  "anomaly_thresholds": {
+    "MEASURING EFFICIENCY (0-6 YEARS) (%)": 20,
+    "suw_rate_pct": 5,
+    "sam_rate_pct": 5,
+    "mam_rate_pct": 5,
+    "stunting_rate_pct": 5
+  },
+  "risk_thresholds": {
+    "critical_measurement_gap": 60,
+    "high_measurement_gap": 80,
+    "high_suw": 15,
+    "high_sam": 8,
+    "high_mam": 15,
+    "high_stunting": 25
+  },
+  "risk_level_rules": {
+    "high_min_flags": 3,
+    "medium_min_flags": 1
+  },
+  "alerts": {
+    "recent_period_window": 3,
+    "high_recent_anomaly_count": 3,
+    "medium_recent_anomaly_count": 1
+  }
+}

@@ -1,0 +1,21 @@
+__pycache__/
+*.pyc
+
+# Raw monthly data
+AWC_Operational_Efficiency_*.csv
+AWC_OPERATIONAL_EFFICIENCY_*.csv
+
+# Derived data artifacts
+AWC_HARMONIZED_MERGED.csv
+AWC_HARMONIZED_MERGED.parquet
+awc_warehouse.sqlite
+
+# Run summaries and local logs
+*_run_summary.json
+*_summary.json
+dashboard_stdout.log
+dashboard_stderr.log
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
