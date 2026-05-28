@@ -186,21 +186,6 @@ The dashboard runs at:
 - `warehouse_load_summary.json`
 - `schema_transition_summary.json`
 
-## Current Scope
+## Project Scope
 
-Current scope is focused on the source monitoring layer:
-
-- monthly source harmonization
-- SQLite warehouse
-- Streamlit dashboard
-- source-faithful counts, coverage, and rolled-up percentages
-
-It does not currently include the older anomaly, risk, or alert layers.
-
-## Suggested Next Improvements
-
-- add screenshots near the top of the README
-- add a sample dashboard walkthrough
-- document expected raw schema variants more explicitly
-- add example dashboard filters and views
-- add deployment notes for a shared local or internal environment
+Current scope is focused on the source monitoring layer, warehouse loading, and dashboard reporting over recurring monthly extracts.
