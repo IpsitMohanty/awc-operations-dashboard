@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
+.pytest_cache/
 
 # Raw monthly data
 AWC_Operational_Efficiency_*.csv
@@ -8,6 +9,12 @@ AWC_OPERATIONAL_EFFICIENCY_*.csv
 # Derived data artifacts
 AWC_HARMONIZED_MERGED.csv
 AWC_HARMONIZED_MERGED.parquet
+AWC_ANOMALY_FLAGS.csv
+AWC_ANOMALY_FLAGS.parquet
+AWC_RISK_FLAGS_LATEST.csv
+AWC_RISK_FLAGS_LATEST.parquet
+AWC_ALERTS_LATEST.csv
+AWC_ALERTS_LATEST.parquet
 awc_warehouse.sqlite
 
 # Run summaries and local logs
