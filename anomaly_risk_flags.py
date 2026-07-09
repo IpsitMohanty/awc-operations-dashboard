@@ -128,36 +128,58 @@ def compute_data_quality_flags(snapshot_df: pd.DataFrame) -> list:
 
 
 def compute_anomaly_flags(snapshot_df: pd.DataFrame, config: dict) -> pd.DataFrame:
+    """For each tracked metric, compute the previous-period value and a rolling
+    baseline (mean of up to recent_period_window prior periods) per centre
+    using vectorized groupby/shift/rolling - not a per-row Python loop, which
+    does not scale to real AWC centre counts (~74k vs. ~2k in the synthetic
+    demo dataset). evaluate_anomaly_flag (unit-tested in tests/) still decides
+    the actual flag_reason; it's only invoked for rows that already cross a
+    threshold on a vectorized pre-filter, keeping the Python-level loop small.
+    """
     thresholds = config["anomaly_thresholds"]
     baseline_window = config["alerts"]["recent_period_window"]
+    sorted_df = snapshot_df.sort_values(["awc_code", "period"]).reset_index(drop=True)
+    grouped_awc_code = sorted_df.groupby("awc_code", sort=False)
+
     records = []
+    for metric_key, column in ANOMALY_METRIC_COLUMNS.items():
+        threshold = thresholds[metric_key]
+        current_value = sorted_df[column]
+        previous_value = grouped_awc_code[column].shift(1)
+        rolling_baseline_value = (
+            previous_value.groupby(sorted_df["awc_code"])
+            .rolling(baseline_window, min_periods=1)
+            .mean()
+            .reset_index(level=0, drop=True)
+        )
 
-    for awc_code, group in snapshot_df.sort_values("period").groupby("awc_code", sort=False):
-        group = group.reset_index(drop=True)
-        for metric_key, column in ANOMALY_METRIC_COLUMNS.items():
-            threshold = thresholds[metric_key]
-            values = group[column]
-            for i in range(len(group)):
-                current_value = values.iloc[i]
-                if not _is_num(current_value):
-                    continue
-                previous_value = values.iloc[i - 1] if i > 0 else None
-                baseline_slice = values.iloc[max(0, i - baseline_window):i].dropna()
-                rolling_baseline_value = baseline_slice.mean() if len(baseline_slice) else None
+        delta_value = current_value - previous_value
+        baseline_gap_value = current_value - rolling_baseline_value
+        candidate_mask = current_value.notna() & (
+            (delta_value.abs() > threshold) | (baseline_gap_value.abs() > threshold)
+        )
+        if not candidate_mask.any():
+            continue
 
-                result = evaluate_anomaly_flag(current_value, previous_value, rolling_baseline_value, threshold)
-                if result["flag_reason"] is None:
-                    continue
+        candidates = sorted_df.loc[candidate_mask, ["awc_code", "period", *IDENTITY_FIELDS]].copy()
+        candidates["current_value"] = current_value[candidate_mask]
+        candidates["previous_value"] = previous_value[candidate_mask]
+        candidates["rolling_baseline_value"] = rolling_baseline_value[candidate_mask]
 
-                row = group.iloc[i]
-                records.append({
-                    "awc_code": awc_code, "period": row["period"], "metric_name": metric_key,
-                    **{k: row.get(k) for k in IDENTITY_FIELDS},
-                    "current_value": current_value, "previous_value": previous_value,
-                    "delta_value": result["delta_value"], "absolute_delta_value": result["absolute_delta_value"],
-                    "rolling_baseline_value": rolling_baseline_value, "baseline_gap_value": result["baseline_gap_value"],
-                    "threshold_value": threshold, "flag_reason": result["flag_reason"],
-                })
+        for row in candidates.to_dict("records"):
+            result = evaluate_anomaly_flag(
+                row["current_value"], row["previous_value"], row["rolling_baseline_value"], threshold,
+            )
+            if result["flag_reason"] is None:
+                continue
+            records.append({
+                "awc_code": row["awc_code"], "period": row["period"], "metric_name": metric_key,
+                **{k: row.get(k) for k in IDENTITY_FIELDS},
+                "current_value": row["current_value"], "previous_value": row["previous_value"],
+                "delta_value": result["delta_value"], "absolute_delta_value": result["absolute_delta_value"],
+                "rolling_baseline_value": row["rolling_baseline_value"], "baseline_gap_value": result["baseline_gap_value"],
+                "threshold_value": threshold, "flag_reason": result["flag_reason"],
+            })
 
     records.extend(compute_data_quality_flags(snapshot_df))
     if not records:
@@ -191,9 +213,20 @@ def compute_risk_snapshot(snapshot_df: pd.DataFrame, config: dict) -> pd.DataFra
 
 
 def compute_alerts_latest(snapshot_df: pd.DataFrame, risk_df: pd.DataFrame, anomaly_df: pd.DataFrame, config: dict) -> pd.DataFrame:
+    """One row per centre for the latest period. Looks up each centre's risk
+    history and recent anomalies via pre-grouped dicts, not by re-filtering
+    the full risk_df/anomaly_df per centre - that per-centre full-table scan
+    is O(centres * total_rows) and does not scale to real AWC centre counts.
+    """
     alerts_config = config["alerts"]
     window = alerts_config["recent_period_window"]
     latest_period = snapshot_df["period"].max()
+
+    risk_by_awc_code = {code: g.set_index("period") for code, g in risk_df.groupby("awc_code", sort=False)}
+    anomaly_by_awc_code = (
+        {code: g for code, g in anomaly_df.groupby("awc_code", sort=False)} if not anomaly_df.empty else {}
+    )
+    empty_anomalies = anomaly_df.iloc[0:0]
 
     records = []
     for awc_code, snap_group in snapshot_df.sort_values("period").groupby("awc_code", sort=False):
@@ -204,16 +237,14 @@ def compute_alerts_latest(snapshot_df: pd.DataFrame, risk_df: pd.DataFrame, anom
         current_row = snap_group.iloc[-1]
         previous_row = snap_group.iloc[-2] if len(snap_group) >= 2 else None
 
-        risk_group = risk_df[risk_df["awc_code"] == awc_code]
-        current_risk = risk_group[risk_group["period"] == current_row["period"]].iloc[0]
+        risk_group = risk_by_awc_code[awc_code]
+        current_risk = risk_group.loc[current_row["period"]]
         previous_risk = None
-        if previous_row is not None:
-            match = risk_group[risk_group["period"] == previous_row["period"]]
-            if not match.empty:
-                previous_risk = match.iloc[0]
+        if previous_row is not None and previous_row["period"] in risk_group.index:
+            previous_risk = risk_group.loc[previous_row["period"]]
 
         recent_periods = set(snap_group["period"].iloc[-window:])
-        centre_anomalies = anomaly_df[anomaly_df["awc_code"] == awc_code] if not anomaly_df.empty else anomaly_df
+        centre_anomalies = anomaly_by_awc_code.get(awc_code, empty_anomalies)
         recent_anomalies = centre_anomalies[centre_anomalies["period"].isin(recent_periods)] if not centre_anomalies.empty else centre_anomalies
 
         recent_anomaly_count = len(recent_anomalies)
