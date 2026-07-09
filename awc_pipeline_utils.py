@@ -206,3 +206,128 @@ def _json_default(value):
     if hasattr(value, "item"):
         return value.item()
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+# ---------------------------------------------------------------------------
+# Anomaly / risk / alert scoring
+#
+# Two independent scoring layers over fct_awc_monthly_snapshot:
+#   - "risk" is an absolute, single-period read: does this period's value
+#     cross a static level (risk_thresholds)? Feeds fct_awc_risk_snapshot.
+#   - "anomaly" is a relative, movement read: did this period's value move
+#     too far from the previous period or its own recent baseline
+#     (anomaly_thresholds)? Feeds fct_awc_anomaly_flags.
+# mart_awc_alerts_latest combines both plus a period-over-period risk-level
+# comparison into a single current-vs-previous alert_scenario per centre.
+# ---------------------------------------------------------------------------
+
+RISK_LEVEL_ORDER = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
+
+
+def _is_num(value) -> bool:
+    return value is not None and not pd.isna(value)
+
+
+def classify_measurement_gap(efficiency_pct, risk_thresholds: dict) -> str | None:
+    if not _is_num(efficiency_pct):
+        return None
+    if efficiency_pct < risk_thresholds["critical_measurement_gap"]:
+        return "CRITICAL_MEASUREMENT_GAP"
+    if efficiency_pct < risk_thresholds["high_measurement_gap"]:
+        return "HIGH_MEASUREMENT_GAP"
+    return None
+
+
+RISK_RATE_CHECKS = (
+    ("suw_rate_pct", "high_suw", "HIGH_SUW_RATE"),
+    ("sam_rate_pct", "high_sam", "HIGH_SAM_RATE"),
+    ("mam_rate_pct", "high_mam", "HIGH_MAM_RATE"),
+    ("stunting_rate_pct", "high_stunting", "HIGH_STUNTING_RATE"),
+)
+
+
+def evaluate_risk_flags(row: dict, risk_thresholds: dict) -> list[str]:
+    flags = []
+    gap_flag = classify_measurement_gap(row.get("measuring_efficiency_0_6_years_pct"), risk_thresholds)
+    if gap_flag:
+        flags.append(gap_flag)
+    for value_key, threshold_key, flag_name in RISK_RATE_CHECKS:
+        value = row.get(value_key)
+        if _is_num(value) and value > risk_thresholds[threshold_key]:
+            flags.append(flag_name)
+    return flags
+
+
+def compute_risk_level(flag_count: int, risk_level_rules: dict) -> str:
+    if flag_count >= risk_level_rules["high_min_flags"]:
+        return "HIGH"
+    if flag_count >= risk_level_rules["medium_min_flags"]:
+        return "MEDIUM"
+    return "LOW"
+
+
+def evaluate_anomaly_flag(current_value, previous_value, rolling_baseline_value, threshold_value) -> dict:
+    """Compare a metric's current value against its previous period and its
+    own recent rolling baseline. Flags when either move exceeds threshold_value."""
+    result = {
+        "delta_value": None,
+        "absolute_delta_value": None,
+        "baseline_gap_value": None,
+        "flag_reason": None,
+    }
+    if not _is_num(current_value):
+        return result
+
+    reasons = []
+    if _is_num(previous_value):
+        delta_value = current_value - previous_value
+        result["delta_value"] = delta_value
+        result["absolute_delta_value"] = abs(delta_value)
+        if abs(delta_value) > threshold_value:
+            reasons.append("PERIOD_OVER_PERIOD_RISE" if delta_value > 0 else "PERIOD_OVER_PERIOD_DROP")
+
+    if _is_num(rolling_baseline_value):
+        baseline_gap_value = current_value - rolling_baseline_value
+        result["baseline_gap_value"] = baseline_gap_value
+        if abs(baseline_gap_value) > threshold_value:
+            reasons.append("BASELINE_DEVIATION_RISE" if baseline_gap_value > 0 else "BASELINE_DEVIATION_DROP")
+
+    if reasons:
+        result["flag_reason"] = "+".join(reasons)
+    return result
+
+
+def risk_direction(current_level: str, previous_level: str | None) -> str:
+    if previous_level is None:
+        return "NEW"
+    current_rank = RISK_LEVEL_ORDER[current_level]
+    previous_rank = RISK_LEVEL_ORDER[previous_level]
+    if current_rank > previous_rank:
+        return "WORSENED"
+    if current_rank < previous_rank:
+        return "IMPROVED"
+    return "UNCHANGED"
+
+
+def compute_alert_scenario(
+    current_risk_level: str,
+    previous_risk_level: str | None,
+    recent_anomaly_count: int,
+    alerts_config: dict,
+) -> str:
+    if previous_risk_level is None:
+        return "NEW_HIGH_RISK" if current_risk_level == "HIGH" else "NEW_MONITORING"
+    if current_risk_level == "HIGH" and previous_risk_level != "HIGH":
+        return "NEW_HIGH_RISK"
+
+    current_rank = RISK_LEVEL_ORDER[current_risk_level]
+    previous_rank = RISK_LEVEL_ORDER[previous_risk_level]
+    if current_rank > previous_rank:
+        return "RISK_ESCALATED"
+    if current_rank < previous_rank:
+        return "RISK_IMPROVED"
+    if current_risk_level == "HIGH":
+        return "PERSISTENT_HIGH_RISK"
+    if recent_anomaly_count >= alerts_config["high_recent_anomaly_count"]:
+        return "ANOMALY_PRESSURE"
+    return "STABLE"
