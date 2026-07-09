@@ -1,12 +1,51 @@
 # AWC Operations Dashboard
 
-Local monthly monitoring pipeline and Streamlit dashboard for AWC operational efficiency and nutrition reporting.
+Local monthly monitoring pipeline and Streamlit dashboard for **AWC operational efficiency, coverage, and nutrition reporting**.
+
+This project takes raw monthly AWC CSV files, harmonizes schema differences across reporting periods, loads the harmonized data into a local SQLite warehouse, and serves a dashboard for operational review.
 
 ## What This Project Does
 
-This workflow takes raw monthly AWC CSV files, normalizes the older percent-based and newer count-based schemas into a single harmonized dataset, scores anomaly/risk/alert signals against it, loads everything into a local SQLite warehouse, and serves a Streamlit dashboard over the warehouse.
+The workflow turns recurring monthly reporting files into a reusable local monitoring system.
 
-The dashboard is intentionally aligned to the source reporting structure:
+It handles:
+
+- schema harmonization across old and new source formats
+- anomaly, risk, and alert scoring against the harmonized data
+- local warehouse loading with SQLite
+- dashboard exploration through Streamlit
+- rolled-up reporting metrics built from numerators and denominators
+
+The result is a structured dashboard workflow over data that would otherwise remain scattered across monthly CSV extracts.
+
+## Why It Exists
+
+Operational reporting files often change schema over time and are difficult to compare consistently month to month.
+
+This project exists to create a stable local reporting layer by:
+
+- standardizing multiple source schemas
+- preserving source-faithful metrics
+- storing harmonized outputs in a local warehouse
+- exposing monitoring views through a dashboard
+
+It is especially useful where the reporting workflow depends on recurring monthly extracts rather than a central transactional database.
+
+## Architecture
+
+Monthly raw CSV files -> harmonization -> anomaly/risk/alert scoring -> SQLite warehouse -> Streamlit dashboard
+
+### Pipeline steps
+
+1. Detect and validate source schema transitions
+2. Harmonize old and new monthly file formats into a common structure
+3. Score anomaly flags, risk snapshots, and latest alerts against the harmonized data
+4. Load the harmonized (and scored) output into SQLite
+5. Serve a Streamlit dashboard over the warehouse
+
+## What the Dashboard Covers
+
+The dashboard is aligned to the source reporting structure and supports analysis across:
 
 - geography and identity
   - `STATE NAME`
@@ -15,11 +54,13 @@ The dashboard is intentionally aligned to the source reporting structure:
   - `SECTOR NAME`
   - `AWC CODE`
   - `AWC NAME`
+
 - coverage and measurement
   - `TOTAL ACTIVE CHILDREN (0-6 YEARS)`
   - `TOTAL ACTIVE CHILDREN MEASURED (0-6 YEARS)`
   - `MEASURING EFFICIENCY (0-6 YEARS) (%)`
   - `TOTAL ACTIVE CHILDREN MEASURED (0-5 YEARS)`
+
 - nutrition counts
   - `SUW`
   - `MUW`
@@ -27,6 +68,7 @@ The dashboard is intentionally aligned to the source reporting structure:
   - `MAM`
   - `SEVERELY STUNTED`
   - `MODERATELY STUNTED`
+
 - reported or normalized percentages
   - `SUW %`
   - `SAM %`
@@ -50,13 +92,13 @@ Example:
 
 ## Supported Source Schemas
 
-Older percent schema includes fields like:
+Older percent-based schema includes fields like:
 
 - `SUW %`
 - `SAM %`
 - `MAM %`
 
-Newer count schema includes fields like:
+Newer count-based schema includes fields like:
 
 - `SUW`
 - `MUW`
@@ -69,19 +111,23 @@ The harmonization step normalizes both into a common schema and preserves `SOURC
 
 ## Rolled-up Percentage Logic
 
-Dashboard summary percentages are rolled up from numerators and denominators. They are not simple averages of AWC percentages.
+Dashboard summary percentages are rolled up from numerators and denominators rather than averaged from center-level percentages.
 
 - Measuring Efficiency `%`
   - `sum(measured 0-6) / sum(active 0-6) * 100`
+
 - SUW `%`
   - `sum(SUW) / sum(measured 0-6) * 100`
   - for older percent files, `SUW` is estimated from `SUW % * measured 0-6`
+
 - SAM `%`
   - `sum(SAM) / sum(measured 0-5) * 100`
   - for older percent files, `SAM` is estimated from `SAM % * measured 0-5`
+
 - MAM `%`
   - `sum(MAM) / sum(measured 0-5) * 100`
   - for older percent files, `MAM` is estimated from `MAM % * measured 0-5`
+
 - Stunting Rate `%`
   - `sum(SEVERELY STUNTED + MODERATELY STUNTED) / sum(measured 0-6) * 100`
 
@@ -213,14 +259,14 @@ Output is written to `synthetic_data/` by default and includes its own
 anomaly lives. **All data in that folder is fictional** - no real AWC
 centres, districts, or children are represented.
 
-## Known Scope
+## Project Scope
 
-Current production scope:
+Current scope:
 
 - monthly source harmonization
 - anomaly flags, risk snapshots, and latest alerts (`anomaly_risk_flags.py`, validated against a synthetic ground-truth log - see above)
-- SQLite warehouse
-- Streamlit dashboard
+- SQLite warehouse loading
+- dashboard reporting over recurring monthly extracts
 - source-faithful counts, coverage, and rolled-up percentages
 
 Not yet in scope:
