@@ -2,7 +2,7 @@
 
 Local monthly monitoring pipeline and Streamlit dashboard for **AWC operational efficiency, coverage, and nutrition reporting**.
 
-This project takes raw monthly AWC CSV files, harmonizes schema differences across reporting periods, loads the harmonized data into a local SQLite warehouse, and serves a dashboard for operational review.
+This project takes raw monthly AWC CSV files, harmonizes schema differences across reporting periods, scores anomaly/risk/alert signals against the harmonized data, loads everything into a local SQLite warehouse, and serves a dashboard for operational review.
 
 ## What This Project Does
 
@@ -208,6 +208,8 @@ The dashboard runs at:
 
 ## Main Files
 
+- `schema_transition_check.py`
+  - detects and reports PERCENT/COUNT schema transitions across monthly files
 - `harmonize_merge_awc.py`
   - normalizes monthly CSV files into a harmonized merged dataset
 - `anomaly_risk_flags.py`
