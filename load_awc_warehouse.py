@@ -117,6 +117,65 @@ def _source_file_to_period(source_file: str) -> pd.Timestamp:
     return pd.Timestamp(year=period.year, month=period.month, day=1)
 
 
+ANOMALY_FLAG_COLUMNS = [
+    "awc_code", "period", "metric_name", "state_name", "district_name", "project_name", "sector_name",
+    "awc_name", "source_file", "current_value", "previous_value", "delta_value", "absolute_delta_value",
+    "rolling_baseline_value", "baseline_gap_value", "threshold_value", "flag_reason",
+]
+
+RISK_SNAPSHOT_COLUMNS = [
+    "awc_code", "period", "state_name", "district_name", "project_name", "sector_name", "awc_name",
+    "source_file", "measuring_efficiency_0_6_years_pct", "suw_rate_pct", "sam_rate_pct", "mam_rate_pct",
+    "stunting_rate_pct", "risk_flags", "risk_flag_count", "risk_level",
+]
+
+_ALERTS_METRIC_DELTA_FIELDS = [
+    "total_active_children_0_6_years", "total_active_children_measured_0_6_years",
+    "measuring_efficiency_0_6_years_pct", "total_active_children_measured_0_5_years",
+    "suw_count", "muw_count", "severely_stunted_count", "moderately_stunted_count",
+    "sam_count", "mam_count", "suw_rate_pct", "sam_rate_pct", "mam_rate_pct", "stunting_rate_pct",
+]
+
+ALERTS_LATEST_COLUMNS = (
+    ["awc_code", "current_period", "previous_period", "state_name", "district_name", "project_name",
+     "sector_name", "awc_name", "source_file"]
+    + [
+        column
+        for field in _ALERTS_METRIC_DELTA_FIELDS
+        for column in (field, f"previous_{field}", f"delta_{field}")
+    ]
+    + [
+        "risk_level", "risk_flags", "risk_flag_count",
+        "previous_risk_period", "previous_risk_level", "previous_risk_flags", "previous_risk_flag_count",
+        "risk_direction", "recent_anomaly_count", "latest_anomaly_period", "recent_anomaly_metrics",
+        "recent_flag_reasons", "alert_scenario",
+    ]
+)
+
+
+def anomaly_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize an already-computed anomaly-flags frame (as written by
+    anomaly_risk_flags.py) to the exact fct_awc_anomaly_flags column order/dtypes."""
+    out = df.copy()
+    out["period"] = pd.to_datetime(out["period"])
+    return out[ANOMALY_FLAG_COLUMNS]
+
+
+def risk_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize an already-computed risk-snapshot frame to the exact
+    fct_awc_risk_snapshot column order/dtypes."""
+    out = df.copy()
+    out["period"] = pd.to_datetime(out["period"])
+    return out[RISK_SNAPSHOT_COLUMNS]
+
+
+def alerts_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize an already-computed latest-alerts frame to the exact
+    mart_awc_alerts_latest column order (current_period/previous_period stay
+    as YYYY-MM text labels, matching the VARCHAR(7) DDL)."""
+    return df[ALERTS_LATEST_COLUMNS]
+
+
 def load_table(conn: sqlite3.Connection, table_name: str, df: pd.DataFrame) -> int:
     df.to_sql(table_name, conn, if_exists="replace", index=False)
     return int(len(df))
@@ -135,10 +194,21 @@ def main() -> None:
 
     snapshot_df = monthly_snapshot_frame(pd.read_parquet(snapshot_file))
 
+    optional_tables = {
+        "fct_awc_anomaly_flags": (folder / "AWC_ANOMALY_FLAGS.parquet", anomaly_frame),
+        "fct_awc_risk_snapshot": (folder / "AWC_RISK_FLAGS_LATEST.parquet", risk_frame),
+        "mart_awc_alerts_latest": (folder / "AWC_ALERTS_LATEST.parquet", alerts_frame),
+    }
+
     with sqlite3.connect(database_file) as conn:
         row_counts = {
             "fct_awc_monthly_snapshot": load_table(conn, "fct_awc_monthly_snapshot", snapshot_df),
         }
+        for table_name, (parquet_file, shaper) in optional_tables.items():
+            if parquet_file.exists():
+                row_counts[table_name] = load_table(conn, table_name, shaper(pd.read_parquet(parquet_file)))
+            else:
+                print(f"Skipping {table_name}: {parquet_file.name} not found (run anomaly_risk_flags.py first).")
         if views_file.exists():
             conn.executescript(views_file.read_text(encoding="utf-8"))
 
