@@ -173,7 +173,9 @@ If `anomaly_risk_flags.py` has never been run against the current warehouse, thi
 python .\scripts\validate_anomaly_detection.py --folder .\synthetic_data
 ```
 
-See `synthetic_data\ANOMALY_DETECTION_VALIDATION.md` for the full breakdown. Headline result: 100% recall on the three anomalies with a dedicated data-quality check (measured > active, efficiency out of range, negative counts); ~93% recall on injected rate spikes via the threshold/drift flags; and an honestly-reported miss on pure population-count spikes, which the current metric set doesn't track (documented in the report, not hidden). The report also separates flags that trace back to an injected anomaly from flags that are ordinary threshold-crossings on non-corrupted synthetic data - the latter are expected detector output, not false positives.
+See `synthetic_data\ANOMALY_DETECTION_VALIDATION.md` for the full breakdown. Headline result: 100% recall on the three anomalies with a dedicated data-quality check (measured > active, efficiency out of range, negative counts); ~89% recall on injected rate spikes via the threshold/drift flags; and an honestly-reported miss on pure population-count spikes, which the current metric set doesn't track (documented in the report, not hidden). The report also separates flags that trace back to an injected anomaly from flags that are ordinary threshold-crossings on non-corrupted synthetic data - the latter are expected detector output, not false positives.
+
+The same report also cross-checks the distressed-centre cluster against the latest-period alerts mart: `NEW_HIGH_RISK` and `PERSISTENT_HIGH_RISK` trace almost entirely back to it (92% and 100% respectively, on seed 42), confirming the organic `HIGH`-risk signal is coming from the intended decline model and not from incidental population noise. It also flags a real, separate interaction worth knowing about: `RISK_ESCALATED` is dominated by an unrelated effect of the November schema-drift month (its silently-zeroed `moderately_stunted_count` deflates that month's risk levels for the *whole* population, not just distressed centres, so December's reversion reads as a mass escalation) - the report explains and quantifies this rather than letting the number look unexplained.
 
 ### Tests
 
@@ -274,6 +276,17 @@ columns, same PERCENT/COUNT schema transition, same filename quirks), with
 deliberate anomalies injected (a row-count drop, a renamed-column schema
 drift, and out-of-range row values) so the harmonizer's drift checks and the
 dashboard's trend charts have something to visibly catch.
+
+~2.5% of centres are also assigned to a **distressed-centre cluster**: instead
+of jittering around a flat baseline all year, these centres decline over the
+12 months toward chronically low measuring efficiency and elevated SUW/SAM/
+stunting rates, so `anomaly_risk_flags.py` finds organic `HIGH`-risk centres
+(seed 42: 30 in the latest period) and a realistic spread of `NEW_HIGH_RISK`,
+`RISK_ESCALATED`, and `PERSISTENT_HIGH_RISK` alert scenarios, instead of
+relying on the independently-random baseline population to cross 3+ risk
+thresholds by chance (see `synthetic_data/README.md` for the onset/severity
+model, and `synthetic_data/synthetic_distressed_centres.csv` for which
+centres).
 
 ```powershell
 python .\scripts\generate_synthetic_data.py
