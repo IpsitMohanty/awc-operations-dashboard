@@ -87,6 +87,47 @@ ANOMALY_KINDS = [
     "population_spike",
 ]
 
+# Distressed-centre cluster: a small, deterministic fraction of centres decline
+# over the year instead of jittering around a flat baseline, so
+# anomaly_risk_flags.py has organic HIGH-risk centres to find (see
+# awc_pipeline_config.json's risk_thresholds/risk_level_rules) rather than
+# relying entirely on the independently-random baseline population to
+# occasionally cross 3+ thresholds by chance. Split into three onset bands so
+# the latest period shows a mix of alert_scenario outcomes: early onset ->
+# already HIGH for months -> PERSISTENT_HIGH_RISK; late onset -> crosses into
+# HIGH only in the last month or two -> NEW_HIGH_RISK; mid onset and the
+# "moderate" severity tier land in between, including some that only reach
+# MEDIUM -> RISK_ESCALATED without a fresh HIGH.
+DISTRESSED_FRACTION = 0.025
+DISTRESSED_SEVERE_SHARE = 0.6
+DISTRESS_ONSET_BANDS = [(1, 4), (5, 8), (9, 11)]
+DISTRESS_BASELINE_EFFICIENCY = 97.0
+DISTRESS_ENDPOINTS = {
+    # Endpoints are deliberately well past awc_pipeline_config.json's
+    # risk_thresholds so a fully-declined severe centre trips all five risk
+    # flags (efficiency + suw + sam + mam + stunting), comfortably clearing
+    # the 3-flag HIGH bar; "moderate" mostly trips efficiency + stunting only
+    # (2 flags -> MEDIUM), so not every distressed centre becomes HIGH.
+    "severe": {
+        "efficiency": 38.0,
+        "suw_rate": 0.24,
+        "muw_rate": 0.22,
+        "severe_stunt_rate": 0.24,
+        "moderate_stunt_rate": 0.20,
+        "sam_rate": 0.14,
+        "mam_rate": 0.22,
+    },
+    "moderate": {
+        "efficiency": 57.0,
+        "suw_rate": 0.09,
+        "muw_rate": 0.16,
+        "severe_stunt_rate": 0.15,
+        "moderate_stunt_rate": 0.13,
+        "sam_rate": 0.05,
+        "mam_rate": 0.09,
+    },
+}
+
 
 @dataclass
 class Centre:
@@ -104,6 +145,8 @@ class Centre:
     sam_rate: float
     mam_rate: float
     full_measurement_prob: float
+    distress_onset_month: int = None
+    distress_severity: str = None
 
 
 def clamp(value, lo, hi):
@@ -113,6 +156,33 @@ def clamp(value, lo, hi):
 def jitter(rng: random.Random, rate: float, spread: float = 0.3, cap: float = 0.9) -> float:
     factor = 1 + rng.uniform(-spread, spread)
     return clamp(rate * factor, 0.0, cap)
+
+
+def _blend(start: float, end: float, t: float) -> float:
+    return start + (end - start) * t
+
+
+def distress_progress(centre: "Centre", month: int) -> float:
+    """0.0 before a distressed centre's onset month, ramping linearly to 1.0
+    (full DISTRESS_ENDPOINTS severity) by month 12 regardless of how late
+    onset falls - a later onset just means a steeper, more sudden decline."""
+    if centre.distress_onset_month is None or month < centre.distress_onset_month:
+        return 0.0
+    span = max(1, 12 - centre.distress_onset_month)
+    return clamp((month - centre.distress_onset_month) / span, 0.0, 1.0)
+
+
+def assign_distress(centres: list, rng: random.Random) -> list:
+    """Deterministically designate a small fraction of centres as chronically
+    declining. Returns the selected centres (for logging), each mutated in
+    place with distress_onset_month/distress_severity set."""
+    n_distressed = round(len(centres) * DISTRESSED_FRACTION)
+    distressed = rng.sample(centres, n_distressed)
+    for i, centre in enumerate(distressed):
+        band = DISTRESS_ONSET_BANDS[i % len(DISTRESS_ONSET_BANDS)]
+        centre.distress_onset_month = rng.randint(*band)
+        centre.distress_severity = "severe" if rng.random() < DISTRESSED_SEVERE_SHARE else "moderate"
+    return distressed
 
 
 def unique_name(rng: random.Random, suffixes: list, used: set, max_tries: int = 50) -> str:
@@ -169,22 +239,51 @@ def build_centres(rng: random.Random) -> list:
     return centres
 
 
-def generate_row_values(centre: Centre, rng: random.Random) -> dict:
-    active = clamp(round(rng.gauss(centre.base_population, max(2.0, centre.base_population * 0.08))), 3, 300)
-    if rng.random() < centre.full_measurement_prob:
-        measured_06 = active
+def generate_row_values(centre: Centre, month: int, rng: random.Random) -> dict:
+    progress = distress_progress(centre, month)
+
+    if progress > 0.0:
+        endpoint = DISTRESS_ENDPOINTS[centre.distress_severity]
+        efficiency_mean = _blend(DISTRESS_BASELINE_EFFICIENCY, endpoint["efficiency"], progress)
+        suw_baseline = _blend(centre.suw_rate, endpoint["suw_rate"], progress)
+        muw_baseline = _blend(centre.muw_rate, endpoint["muw_rate"], progress)
+        severe_baseline = _blend(centre.severe_stunt_rate, endpoint["severe_stunt_rate"], progress)
+        moderate_baseline = _blend(centre.moderate_stunt_rate, endpoint["moderate_stunt_rate"], progress)
+        sam_baseline = _blend(centre.sam_rate, endpoint["sam_rate"], progress)
+        mam_baseline = _blend(centre.mam_rate, endpoint["mam_rate"], progress)
     else:
-        drop = rng.randint(1, max(1, round(active * 0.3)))
-        measured_06 = max(0, active - drop)
+        efficiency_mean = None
+        suw_baseline = centre.suw_rate
+        muw_baseline = centre.muw_rate
+        severe_baseline = centre.severe_stunt_rate
+        moderate_baseline = centre.moderate_stunt_rate
+        sam_baseline = centre.sam_rate
+        mam_baseline = centre.mam_rate
+
+    active = clamp(round(rng.gauss(centre.base_population, max(2.0, centre.base_population * 0.08))), 3, 300)
+
+    if efficiency_mean is None:
+        if rng.random() < centre.full_measurement_prob:
+            measured_06 = active
+        else:
+            drop = rng.randint(1, max(1, round(active * 0.3)))
+            measured_06 = max(0, active - drop)
+    else:
+        # Distress-driven low efficiency (an operational decline), not a data
+        # error - measured never exceeds active here, unlike the
+        # measured_exceeds_active row anomaly below.
+        efficiency_sample = clamp(rng.gauss(efficiency_mean, 4.0), 5.0, 100.0)
+        measured_06 = clamp(round(active * efficiency_sample / 100), 0, active)
+
     efficiency = round((measured_06 / active) * 100, 1) if active else 0.0
     measured_05 = max(0, round(measured_06 * rng.uniform(0.72, 0.95)))
 
-    suw_rate = jitter(rng, centre.suw_rate)
-    muw_rate = jitter(rng, centre.muw_rate)
-    severe_rate = jitter(rng, centre.severe_stunt_rate)
-    moderate_rate = jitter(rng, centre.moderate_stunt_rate)
-    sam_rate = jitter(rng, centre.sam_rate)
-    mam_rate = jitter(rng, centre.mam_rate)
+    suw_rate = jitter(rng, suw_baseline)
+    muw_rate = jitter(rng, muw_baseline)
+    severe_rate = jitter(rng, severe_baseline)
+    moderate_rate = jitter(rng, moderate_baseline)
+    sam_rate = jitter(rng, sam_baseline)
+    mam_rate = jitter(rng, mam_baseline)
 
     return {
         "active_06": active,
@@ -295,7 +394,7 @@ def build_period_file(centres: list, spec: tuple, rng: random.Random, anomaly_lo
 
     rows = []
     for centre in working_centres:
-        values = generate_row_values(centre, rng)
+        values = generate_row_values(centre, month, rng)
         kind = maybe_inject_row_anomaly(values, schema, rng)
         if kind:
             anomaly_log.append({
@@ -354,32 +453,64 @@ def write_readme_note(output_dir: Path, summary: dict) -> None:
         f"- **Out-of-range row values** (~{summary['row_anomaly_rate_target'] * 100:.0f}% of rows, "
         f"{summary['row_anomaly_count']} rows): measured children exceeding active children, "
         "measuring efficiency outside 0-100%, negative nutrition counts, implausible rate "
-        "spikes, and implausible population spikes. These do not crash the current pipeline "
-        "(there is no live per-row anomaly-flag layer today - see the main README's 'Known "
-        "Scope' section), but they show up as visible outliers in the dashboard and are exactly "
-        "the kind of rows the thresholds in `awc_pipeline_config.json` "
-        "(`anomaly_thresholds`, `risk_thresholds`) are meant to catch if that layer is rebuilt. "
-        "See `synthetic_anomaly_log.csv` for the full list of affected "
-        "`(period, awc_code, anomaly_kind)` rows.",
+        "spikes, and implausible population spikes. These do not crash the pipeline, but they "
+        "show up as visible outliers in the dashboard and are exactly the kind of rows the "
+        "thresholds in `awc_pipeline_config.json` (`anomaly_thresholds`, `risk_thresholds`) are "
+        "designed to catch via `anomaly_risk_flags.py`. See `synthetic_anomaly_log.csv` for the "
+        "full list of affected `(period, awc_code, anomaly_kind)` rows.",
+        "",
+        "## Distressed-centre cluster",
+        "",
+        f"{summary['distressed_centre_count']} centres ({summary['distressed_severe_count']} "
+        f"\"severe\", {summary['distressed_moderate_count']} \"moderate\", "
+        f"~{summary['distressed_centre_count'] / summary['centre_count'] * 100:.1f}% of all "
+        f"{summary['centre_count']} centres) decline over the year instead of jittering around a "
+        "flat baseline, so `anomaly_risk_flags.py` has organic `HIGH`-risk centres to find rather "
+        "than relying on the independently-random baseline population to cross 3+ "
+        "`risk_thresholds` by chance alone (it rarely does - see `ANOMALY_DETECTION_VALIDATION.md`, "
+        "which notes zero organic `HIGH` centres before this cluster existed).",
+        "",
+        "Each distressed centre gets a random onset month (1-11, in one of three roughly equal "
+        "bands: 1-4, 5-8, 9-11) and a severity tier. From onset month to month 12, its measuring "
+        "efficiency and SUW/SAM/MAM/stunting rates blend linearly from a normal baseline toward a "
+        "severity-specific endpoint, reaching that endpoint exactly at month 12 regardless of how "
+        "late onset falls - a later onset just means a steeper, more sudden decline:",
+        "",
+        "- **Severe** endpoint clears all five `risk_thresholds` (efficiency, SUW, SAM, MAM, "
+        "stunting), comfortably past `risk_level_rules.high_min_flags` (3) - reliably `HIGH` by "
+        "December.",
+        "- **Moderate** endpoint mostly only trips the efficiency and stunting flags (2 of 5) - "
+        "typically `MEDIUM`, not `HIGH`.",
+        "- Early-onset centres are usually already `HIGH` well before December -> "
+        "`PERSISTENT_HIGH_RISK`. Late-onset centres cross into `HIGH` only in the last month or "
+        "two -> `NEW_HIGH_RISK`. Moderate-tier and boundary cases produce `RISK_ESCALATED` without "
+        "necessarily reaching `HIGH`.",
+        "",
+        "See `synthetic_distressed_centres.csv` for the full list "
+        "(`awc_code, district_name, project_name, sector_name, distress_severity, "
+        "distress_onset_month, distress_onset_period`).",
         "",
         "## Using this dataset",
         "",
         "```powershell",
         f'python schema_transition_check.py --folder "{output_dir}"',
         f'python harmonize_merge_awc.py --folder "{output_dir}"',
+        f'python anomaly_risk_flags.py --folder "{output_dir}"',
         f'python load_awc_warehouse.py --folder "{output_dir}"',
         "```",
         "",
-        "`awc_dashboard_streamlit.py` reads a fixed `awc_warehouse.sqlite` path next to the",
-        "script. To view this synthetic dataset in the dashboard, back up the real",
-        f"`awc_warehouse.sqlite` and copy the one produced above "
-        f"(`{output_dir}\\awc_warehouse.sqlite`) over it, or point a separate copy of the",
+        "`awc_dashboard_streamlit.py` reads Postgres if `DATABASE_URL` is set in the environment, "
+        "otherwise a fixed `awc_warehouse.sqlite` path next to the script (see the main README's "
+        "'Dashboard Backend' section). To view this synthetic dataset locally without Postgres, "
+        "back up the real `awc_warehouse.sqlite` and copy the one produced above "
+        f"(`{output_dir}\\awc_warehouse.sqlite`) over it, or point a separate copy of the "
         "dashboard script at the synthetic database file.",
         "",
         "## Files",
         "",
         "- Monthly CSVs: `AWC_Operational_Efficiency_*.csv` / `AWC_OPERATIONAL_EFFICIENCY_*.csv`",
         "- `synthetic_anomaly_log.csv` - every injected row-level anomaly, with period/AWC code/kind",
+        "- `synthetic_distressed_centres.csv` - every centre in the distressed cluster, with severity/onset",
         "- `synthetic_generation_summary.json` - machine-readable generation summary (seed, files, counts)",
         "",
     ]
@@ -408,6 +539,7 @@ def main() -> None:
 
     rng = random.Random(args.seed)
     centres = build_centres(rng)
+    distressed_centres = assign_distress(centres, rng)
 
     anomaly_log = []
     file_summaries = []
@@ -434,6 +566,28 @@ def main() -> None:
     anomaly_log_path = output_dir / "synthetic_anomaly_log.csv"
     anomaly_df.to_csv(anomaly_log_path, index=False)
 
+    distressed_rows = [
+        {
+            "awc_code": c.awc_code,
+            "district_name": c.district_name,
+            "project_name": c.project_name,
+            "sector_name": c.sector_name,
+            "distress_severity": c.distress_severity,
+            "distress_onset_month": c.distress_onset_month,
+            "distress_onset_period": f"2024-{c.distress_onset_month:02d}",
+        }
+        for c in distressed_centres
+    ]
+    distressed_df = pd.DataFrame(
+        distressed_rows,
+        columns=[
+            "awc_code", "district_name", "project_name", "sector_name",
+            "distress_severity", "distress_onset_month", "distress_onset_period",
+        ],
+    ).sort_values(["distress_onset_month", "awc_code"])
+    distressed_log_path = output_dir / "synthetic_distressed_centres.csv"
+    distressed_df.to_csv(distressed_log_path, index=False)
+
     total_rows = sum(f["row_count"] for f in file_summaries)
     summary = {
         "generator": "generate_synthetic_data",
@@ -448,6 +602,9 @@ def main() -> None:
         "row_anomaly_count": len(anomaly_log),
         "row_count_drop_period": f"{ROW_COUNT_DROP_PERIOD[0]:04d}-{ROW_COUNT_DROP_PERIOD[1]:02d}",
         "column_rename_period": f"{COLUMN_RENAME_PERIOD[0]:04d}-{COLUMN_RENAME_PERIOD[1]:02d}",
+        "distressed_centre_count": len(distressed_centres),
+        "distressed_severe_count": sum(1 for c in distressed_centres if c.distress_severity == "severe"),
+        "distressed_moderate_count": sum(1 for c in distressed_centres if c.distress_severity == "moderate"),
         "files": file_summaries,
     }
     write_run_summary(output_dir / "synthetic_generation_summary.json", summary)
@@ -458,7 +615,12 @@ def main() -> None:
     print(f"Row-level anomalies injected: {len(anomaly_log)} ({len(anomaly_log) / total_rows * 100:.2f}% of rows)")
     print(f"Row-count drop injected in: {summary['row_count_drop_period']}")
     print(f"Column-rename schema drift injected in: {summary['column_rename_period']}")
+    print(
+        f"Distressed centres: {summary['distressed_centre_count']} "
+        f"({summary['distressed_severe_count']} severe, {summary['distressed_moderate_count']} moderate)"
+    )
     print(f"Anomaly log: {anomaly_log_path}")
+    print(f"Distressed-centre log: {distressed_log_path}")
     print(f"Generation summary: {output_dir / 'synthetic_generation_summary.json'}")
     print(f"Dataset README: {output_dir / 'README.md'}")
 

@@ -23,23 +23,34 @@ Regenerating with the same seed reproduces this dataset byte-for-byte.
 
 - **Row-count drop** (`AWC_Operational_Efficiency_09_2024_September.csv`): ships with roughly 10% fewer rows than the other months. Running `harmonize_merge_awc.py` across the full folder will raise `Abnormal row-count drift detected` for this file - that's intentional, and demonstrates the harmonizer's built-in row-count drift guard (`validate_file_summaries` in `awc_pipeline_utils.py`). Remove or fix that one file to let the harmonize step proceed across the rest.
 - **Schema drift / renamed column** (`AWC_Operational_Efficiency_11_2024_November.csv`): ships with `MODERATELY STUNTED` renamed to `MODERATE STUNTED`. The COUNT-schema classification is unaffected (`classify_schema` still sees the other count columns), so the harmonizer does not raise - it silently backfills `MODERATELY STUNTED` as blank for every row that month. Look for the resulting dip to zero in `moderately_stunted_count` / `stunting_rate_pct` for that month in the dashboard's trend charts, and cross-check it against `schema_transition_check.py`'s output.
-- **Out-of-range row values** (~2% of rows, 451 rows): measured children exceeding active children, measuring efficiency outside 0-100%, negative nutrition counts, implausible rate spikes, and implausible population spikes. These do not crash the current pipeline (there is no live per-row anomaly-flag layer today - see the main README's 'Known Scope' section), but they show up as visible outliers in the dashboard and are exactly the kind of rows the thresholds in `awc_pipeline_config.json` (`anomaly_thresholds`, `risk_thresholds`) are meant to catch if that layer is rebuilt. See `synthetic_anomaly_log.csv` for the full list of affected `(period, awc_code, anomaly_kind)` rows.
+- **Out-of-range row values** (~2% of rows, 479 rows): measured children exceeding active children, measuring efficiency outside 0-100%, negative nutrition counts, implausible rate spikes, and implausible population spikes. These do not crash the pipeline, but they show up as visible outliers in the dashboard and are exactly the kind of rows the thresholds in `awc_pipeline_config.json` (`anomaly_thresholds`, `risk_thresholds`) are designed to catch via `anomaly_risk_flags.py`. See `synthetic_anomaly_log.csv` for the full list of affected `(period, awc_code, anomaly_kind)` rows.
+
+## Distressed-centre cluster
+
+50 centres (29 "severe", 21 "moderate", ~2.5% of all 2000 centres) decline over the year instead of jittering around a flat baseline, so `anomaly_risk_flags.py` has organic `HIGH`-risk centres to find rather than relying on the independently-random baseline population to cross 3+ `risk_thresholds` by chance alone (it rarely does - see `ANOMALY_DETECTION_VALIDATION.md`, which notes zero organic `HIGH` centres before this cluster existed).
+
+Each distressed centre gets a random onset month (1-11, in one of three roughly equal bands: 1-4, 5-8, 9-11) and a severity tier. From onset month to month 12, its measuring efficiency and SUW/SAM/MAM/stunting rates blend linearly from a normal baseline toward a severity-specific endpoint, reaching that endpoint exactly at month 12 regardless of how late onset falls - a later onset just means a steeper, more sudden decline:
+
+- **Severe** endpoint clears all five `risk_thresholds` (efficiency, SUW, SAM, MAM, stunting), comfortably past `risk_level_rules.high_min_flags` (3) - reliably `HIGH` by December.
+- **Moderate** endpoint mostly only trips the efficiency and stunting flags (2 of 5) - typically `MEDIUM`, not `HIGH`.
+- Early-onset centres are usually already `HIGH` well before December -> `PERSISTENT_HIGH_RISK`. Late-onset centres cross into `HIGH` only in the last month or two -> `NEW_HIGH_RISK`. Moderate-tier and boundary cases produce `RISK_ESCALATED` without necessarily reaching `HIGH`.
+
+See `synthetic_distressed_centres.csv` for the full list (`awc_code, district_name, project_name, sector_name, distress_severity, distress_onset_month, distress_onset_period`).
 
 ## Using this dataset
 
 ```powershell
 python schema_transition_check.py --folder "D:\AWC_Operational_Efficiency Reports\synthetic_data"
 python harmonize_merge_awc.py --folder "D:\AWC_Operational_Efficiency Reports\synthetic_data"
+python anomaly_risk_flags.py --folder "D:\AWC_Operational_Efficiency Reports\synthetic_data"
 python load_awc_warehouse.py --folder "D:\AWC_Operational_Efficiency Reports\synthetic_data"
 ```
 
-`awc_dashboard_streamlit.py` reads a fixed `awc_warehouse.sqlite` path next to the
-script. To view this synthetic dataset in the dashboard, back up the real
-`awc_warehouse.sqlite` and copy the one produced above (`D:\AWC_Operational_Efficiency Reports\synthetic_data\awc_warehouse.sqlite`) over it, or point a separate copy of the
-dashboard script at the synthetic database file.
+`awc_dashboard_streamlit.py` reads Postgres if `DATABASE_URL` is set in the environment, otherwise a fixed `awc_warehouse.sqlite` path next to the script (see the main README's 'Dashboard Backend' section). To view this synthetic dataset locally without Postgres, back up the real `awc_warehouse.sqlite` and copy the one produced above (`D:\AWC_Operational_Efficiency Reports\synthetic_data\awc_warehouse.sqlite`) over it, or point a separate copy of the dashboard script at the synthetic database file.
 
 ## Files
 
 - Monthly CSVs: `AWC_Operational_Efficiency_*.csv` / `AWC_OPERATIONAL_EFFICIENCY_*.csv`
 - `synthetic_anomaly_log.csv` - every injected row-level anomaly, with period/AWC code/kind
+- `synthetic_distressed_centres.csv` - every centre in the distressed cluster, with severity/onset
 - `synthetic_generation_summary.json` - machine-readable generation summary (seed, files, counts)
