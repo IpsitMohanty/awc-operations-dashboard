@@ -5,6 +5,35 @@ import pandas as pd
 import awc_dashboard_streamlit as dash
 
 
+class TestResolveDatabaseUrl:
+    def test_env_var_wins_over_secrets(self, monkeypatch):
+        monkeypatch.setenv("DATABASE_URL", "postgresql://env-value")
+        monkeypatch.setattr(dash.st, "secrets", {"DATABASE_URL": "postgresql://secrets-value"})
+        assert dash._resolve_database_url() == "postgresql://env-value"
+
+    def test_falls_back_to_secrets_when_env_var_absent(self, monkeypatch):
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        monkeypatch.setattr(dash.st, "secrets", {"DATABASE_URL": "postgresql://secrets-value"})
+        assert dash._resolve_database_url() == "postgresql://secrets-value"
+
+    def test_none_when_neither_present(self, monkeypatch):
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        monkeypatch.setattr(dash.st, "secrets", {})
+        assert dash._resolve_database_url() is None
+
+    def test_none_when_secrets_access_raises(self, monkeypatch):
+        # A missing secrets.toml is a normal local-dev state on real Streamlit,
+        # not something that should crash the resolver.
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+
+        class RaisingSecrets:
+            def get(self, key):
+                raise FileNotFoundError("no secrets.toml")
+
+        monkeypatch.setattr(dash.st, "secrets", RaisingSecrets())
+        assert dash._resolve_database_url() is None
+
+
 class TestPeriodLabel:
     def test_sqlite_text_value_truncated(self):
         assert dash._period_label("2024-01-01 00:00:00") == "2024-01"

@@ -13,7 +13,26 @@ st.set_page_config(
 
 
 DB_FILE = Path(__file__).resolve().parent / "awc_warehouse.sqlite"
-DATABASE_URL = os.environ.get("DATABASE_URL")
+
+
+def _resolve_database_url() -> str | None:
+    """OS env var wins (local dev, docker, most non-Streamlit-Cloud hosts).
+    Falls back to st.secrets, which is how Streamlit Community Cloud actually
+    delivers secrets - it does not set OS environment variables. Falls back
+    to None (SQLite) if neither is configured; st.secrets raises if no
+    secrets.toml exists at all, which is a normal local-dev state, not an
+    error, so that's caught rather than left to crash the app.
+    """
+    env_value = os.environ.get("DATABASE_URL")
+    if env_value:
+        return env_value
+    try:
+        return st.secrets.get("DATABASE_URL")
+    except Exception:
+        return None
+
+
+DATABASE_URL = _resolve_database_url()
 USE_POSTGRES = bool(DATABASE_URL)
 
 # Query results: long enough that clicking one filter doesn't re-query for

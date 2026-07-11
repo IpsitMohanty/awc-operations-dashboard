@@ -23,6 +23,10 @@ awc_warehouse.sqlite
 dashboard_stdout.log
 dashboard_stderr.log
 
+# Streamlit secrets (local dev equivalent of Streamlit Community Cloud's
+# secrets manager - must never be committed)
+.streamlit/secrets.toml
+
 # OS/editor noise
 .DS_Store
 Thumbs.db
