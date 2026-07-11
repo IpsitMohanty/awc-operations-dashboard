@@ -11,14 +11,14 @@ output (`AWC_ANOMALY_FLAGS.csv`) against the synthetic generator's ground-truth 
 
 | anomaly_kind | injected | caught | recall | via data-quality flag | via rate/drift flag |
 |---|---:|---:|---:|---:|---:|
-| efficiency_out_of_range | 74 | 74 | 100.0% | 74 | 56 |
-| extreme_rate_spike | 97 | 90 | 92.8% | 0 | 90 |
-| measured_exceeds_active | 100 | 100 | 100.0% | 100 | 87 |
-| negative_count | 77 | 77 | 100.0% | 76 | 62 |
-| population_spike | 81 | 32 | 39.5% | 0 | 32 |
-| **overall** | **429** | **373** | **86.9%** | | |
+| efficiency_out_of_range | 83 | 83 | 100.0% | 83 | 62 |
+| extreme_rate_spike | 99 | 88 | 88.9% | 0 | 88 |
+| measured_exceeds_active | 86 | 86 | 100.0% | 86 | 65 |
+| negative_count | 81 | 81 | 100.0% | 81 | 62 |
+| population_spike | 94 | 42 | 44.7% | 0 | 42 |
+| **overall** | **443** | **380** | **85.8%** | | |
 
-- 22 row-level anomalies were injected into `2024-09` (the deliberate row-count-drop month) and are excluded from the table above: `harmonize_merge_awc.py` refuses to merge *any* file in the folder while that one fails its row-count drift check, so those rows never reach `fct_awc_monthly_snapshot` and can't be evaluated. This is treated as expected behavior, not a detector miss - the drift guard blocks the whole batch before per-row anomaly scoring ever runs on the bad file.
+- 36 row-level anomalies were injected into `2024-09` (the deliberate row-count-drop month) and are excluded from the table above: `harmonize_merge_awc.py` refuses to merge *any* file in the folder while that one fails its row-count drift check, so those rows never reach `fct_awc_monthly_snapshot` and can't be evaluated. This is treated as expected behavior, not a detector miss - the drift guard blocks the whole batch before per-row anomaly scoring ever runs on the bad file.
 
 ## Flag volume: injected anomalies vs. normal-data threshold crossings
 
@@ -31,18 +31,31 @@ them are expected to trace back to an injected anomaly.
 
 | flag type | from an injected anomaly row | from normal generated data | total |
 |---|---:|---:|---:|
-| data-quality | 370 | 0 | 370 |
-| rate/drift threshold | 463 | 10280 | 10743 |
+| data-quality | 359 | 0 | 359 |
+| rate/drift threshold | 453 | 10580 | 11033 |
 
-Total flag rows in `fct_awc_anomaly_flags`: 11113.
+Total flag rows in `fct_awc_anomaly_flags`: 11392.
+
+## Distressed-centre cluster: organic HIGH risk
+
+`50` centres (29 severe, 21 moderate) decline over the year per `scripts/generate_synthetic_data.py`'s distress trajectory. Cross-checking the latest-period
+`mart_awc_alerts_latest` against that list:
+
+| risk_level / alert_scenario | count | from distressed cluster |
+|---|---:|---:|
+| HIGH risk_level | 30 | 29 |
+| NEW_HIGH_RISK | 13 | 12 |
+| PERSISTENT_HIGH_RISK | 17 | 17 |
+| RISK_ESCALATED | 590 | 1 |
+| ANOMALY_PRESSURE | 814 | 20 |
+
+`NEW_HIGH_RISK` and `PERSISTENT_HIGH_RISK` should trace almost entirely to the distressed cluster - that's the point of it. `RISK_ESCALATED`, if its count is large and its distressed-cluster share is low (1/590 here), is most likely dominated by an unrelated effect: the November schema-drift month (`COLUMN_RENAME_PERIOD`) silently zeroes `moderately_stunted_count` for every centre that month, artificially deflating November's stunting rate and risk level for the whole population; December's rate reverts to normal, which reads as a LOW->MEDIUM escalation for many centres that were never actually declining. This is a real interaction between two independently-intentional anomalies, not a bug in either one - verify the actual cause with `risk['stunting_rate_pct'].groupby(risk['period']).mean()` before assuming it's distress-driven.
 
 ## Notes
 
-- This dataset's per-centre nutrition rates are drawn independently per metric, so no centre
-  organically crosses 3+ simultaneous risk thresholds (the `risk_level_rules.high_min_flags`
-  bar for `HIGH`) in this particular seed. `HIGH`-risk classification, `NEW_HIGH_RISK`, and
-  `PERSISTENT_HIGH_RISK` are exercised directly in `tests/` with small hand-built fixtures
-  instead of relying on this dataset to produce one by chance.
+- `HIGH`-risk classification, `NEW_HIGH_RISK`, and `PERSISTENT_HIGH_RISK` are also exercised
+  directly in `tests/` with small hand-built fixtures, independent of what this particular
+  seed's distressed cluster happens to produce.
 - Recall for `measured_exceeds_active`, `efficiency_out_of_range`, and `negative_count` is
   expected to be at or near 100% by construction - each has a dedicated data-quality check.
   `extreme_rate_spike` directly mutates a tracked rate/count field, so it is reliably (though

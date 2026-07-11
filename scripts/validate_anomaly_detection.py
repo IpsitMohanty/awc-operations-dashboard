@@ -40,6 +40,61 @@ DATA_QUALITY_METRICS = {
 }
 
 
+def _build_distress_section(distressed_path: Path, alerts_path: Path) -> list:
+    """Cross-checks the latest-period alerts mart against the distressed-centre
+    log: how much of the organic HIGH-risk / escalation signal actually traces
+    back to the deliberately-declining cluster, vs. incidental population
+    noise or unrelated pipeline effects (e.g. the November schema-drift
+    month's artificially low stunting rate briefly deflating risk levels)."""
+    if not distressed_path.exists() or not alerts_path.exists():
+        return [
+            "## Distressed-centre cluster",
+            "",
+            f"Skipped: `{distressed_path.name}` or `{alerts_path.name}` not found in this folder.",
+            "",
+        ]
+
+    distressed = pd.read_csv(distressed_path, dtype={"awc_code": str})
+    alerts = pd.read_csv(alerts_path, dtype={"awc_code": str})
+    distressed_codes = set(distressed["awc_code"])
+
+    lines = [
+        "## Distressed-centre cluster: organic HIGH risk",
+        "",
+        f"`{len(distressed)}` centres ({(distressed['distress_severity'] == 'severe').sum()} severe, "
+        f"{(distressed['distress_severity'] == 'moderate').sum()} moderate) decline over the year per "
+        "`scripts/generate_synthetic_data.py`'s distress trajectory. Cross-checking the latest-period",
+        "`mart_awc_alerts_latest` against that list:",
+        "",
+        "| risk_level / alert_scenario | count | from distressed cluster |",
+        "|---|---:|---:|",
+    ]
+    high = alerts[alerts["risk_level"] == "HIGH"]
+    lines.append(f"| HIGH risk_level | {len(high)} | {high['awc_code'].isin(distressed_codes).sum()} |")
+    for scenario in ["NEW_HIGH_RISK", "PERSISTENT_HIGH_RISK", "RISK_ESCALATED", "ANOMALY_PRESSURE"]:
+        subset = alerts[alerts["alert_scenario"] == scenario]
+        in_distressed = subset["awc_code"].isin(distressed_codes).sum()
+        lines.append(f"| {scenario} | {len(subset)} | {in_distressed} |")
+
+    escalated = alerts[alerts["alert_scenario"] == "RISK_ESCALATED"]
+    escalated_from_distress = int(escalated["awc_code"].isin(distressed_codes).sum())
+    lines += [
+        "",
+        "`NEW_HIGH_RISK` and `PERSISTENT_HIGH_RISK` should trace almost entirely to the distressed "
+        "cluster - that's the point of it. `RISK_ESCALATED`, if its count is large and its "
+        f"distressed-cluster share is low ({escalated_from_distress}/{len(escalated)} here), is most "
+        "likely dominated by an unrelated effect: the November schema-drift month "
+        "(`COLUMN_RENAME_PERIOD`) silently zeroes `moderately_stunted_count` for every centre that "
+        "month, artificially deflating November's stunting rate and risk level for the whole "
+        "population; December's rate reverts to normal, which reads as a LOW->MEDIUM escalation for "
+        "many centres that were never actually declining. This is a real interaction between two "
+        "independently-intentional anomalies, not a bug in either one - verify the actual cause with "
+        "`risk['stunting_rate_pct'].groupby(risk['period']).mean()` before assuming it's distress-driven.",
+        "",
+    ]
+    return lines
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Validate anomaly_risk_flags.py recall against synthetic ground truth.")
     parser.add_argument("--folder", default="synthetic_data", help="Folder containing the synthetic dataset and pipeline outputs.")
@@ -61,6 +116,10 @@ def main() -> None:
 
     ground_truth = pd.read_csv(ground_truth_path)
     flags = pd.read_csv(flags_path)
+
+    distressed_path = folder / "synthetic_distressed_centres.csv"
+    alerts_path = folder / "AWC_ALERTS_LATEST.csv"
+    distress_section = _build_distress_section(distressed_path, alerts_path)
 
     drop_period_label = f"{ROW_COUNT_DROP_PERIOD[0]:04d}-{ROW_COUNT_DROP_PERIOD[1]:02d}"
     unreachable = ground_truth[ground_truth["period"] == drop_period_label]
@@ -154,13 +213,14 @@ def main() -> None:
         "",
         f"Total flag rows in `fct_awc_anomaly_flags`: {len(flags)}.",
         "",
+    ]
+    lines += distress_section
+    lines += [
         "## Notes",
         "",
-        "- This dataset's per-centre nutrition rates are drawn independently per metric, so no centre",
-        "  organically crosses 3+ simultaneous risk thresholds (the `risk_level_rules.high_min_flags`",
-        "  bar for `HIGH`) in this particular seed. `HIGH`-risk classification, `NEW_HIGH_RISK`, and",
-        "  `PERSISTENT_HIGH_RISK` are exercised directly in `tests/` with small hand-built fixtures",
-        "  instead of relying on this dataset to produce one by chance.",
+        "- `HIGH`-risk classification, `NEW_HIGH_RISK`, and `PERSISTENT_HIGH_RISK` are also exercised",
+        "  directly in `tests/` with small hand-built fixtures, independent of what this particular",
+        "  seed's distressed cluster happens to produce.",
         "- Recall for `measured_exceeds_active`, `efficiency_out_of_range`, and `negative_count` is",
         "  expected to be at or near 100% by construction - each has a dedicated data-quality check.",
         "  `extreme_rate_spike` directly mutates a tracked rate/count field, so it is reliably (though",
