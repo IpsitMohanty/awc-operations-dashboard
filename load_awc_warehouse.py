@@ -33,6 +33,14 @@ def resolve_output_path(folder: Path, value: str) -> Path:
     return path if path.is_absolute() else folder / path
 
 
+def resolve_script_relative_path(value: str) -> Path:
+    """The views SQL file ships next to the scripts, not per-run curated
+    data, so its default resolves relative to this file's directory rather
+    than --folder (which may point at a data-only folder like synthetic_data/)."""
+    path = Path(value)
+    return path if path.is_absolute() else Path(__file__).resolve().parent / path
+
+
 def monthly_snapshot_frame(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     out["period"] = pd.to_datetime(out["SOURCE_FILE"].map(_source_file_to_period))
@@ -186,7 +194,7 @@ def main() -> None:
     folder = resolve_folder(args.folder)
     database_file = resolve_output_path(folder, args.database_file)
     summary_file = resolve_output_path(folder, args.summary_file)
-    views_file = resolve_output_path(folder, args.views_file)
+    views_file = resolve_script_relative_path(args.views_file)
 
     snapshot_file = folder / "AWC_HARMONIZED_MERGED.parquet"
     if not snapshot_file.exists():

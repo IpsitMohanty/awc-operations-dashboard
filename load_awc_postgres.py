@@ -42,6 +42,11 @@ def parse_args() -> argparse.Namespace:
         default="warehouse_schema_postgres.sql",
         help="Name or path of the PostgreSQL DDL file.",
     )
+    parser.add_argument(
+        "--views-file",
+        default="analytics_views_postgres.sql",
+        help="Name or path of the SQL views file to apply after table load.",
+    )
     return parser.parse_args()
 
 
@@ -64,6 +69,14 @@ def resolve_connection_string(args: argparse.Namespace) -> str:
 def resolve_output_path(folder: Path, value: str) -> Path:
     path = Path(value)
     return path if path.is_absolute() else folder / path
+
+
+def resolve_script_relative_path(value: str) -> Path:
+    """DDL/view SQL files ship next to the scripts, not per-run curated data,
+    so their defaults resolve relative to this file's directory rather than
+    --folder (which may point at a data-only folder like synthetic_data/)."""
+    path = Path(value)
+    return path if path.is_absolute() else Path(__file__).resolve().parent / path
 
 
 def load_parquet_frames(folder: Path) -> dict[str, pd.DataFrame]:
@@ -112,7 +125,8 @@ def copy_dataframe(cur, schema: str, table_name: str, df: pd.DataFrame) -> None:
 def main() -> None:
     args = parse_args()
     folder = resolve_folder(args.folder)
-    ddl_file = resolve_output_path(folder, args.create_tables_sql)
+    ddl_file = resolve_script_relative_path(args.create_tables_sql)
+    views_file = resolve_script_relative_path(args.views_file)
 
     try:
         import psycopg2
@@ -135,6 +149,9 @@ def main() -> None:
 
             for table_name, df in frames.items():
                 copy_dataframe(cur, args.schema, table_name, df)
+
+            if views_file.exists():
+                cur.execute(views_file.read_text(encoding="utf-8"))
         conn.commit()
     except Exception:
         conn.rollback()
