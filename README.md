@@ -154,6 +154,17 @@ There are two independent scoring layers:
 
 This decision table extends `dashboard_spec.md`'s two named examples (`NEW_HIGH_RISK`, `RISK_ESCALATED`) into a fully-specified enumeration; see `evaluate_risk_flags`, `compute_risk_level`, `evaluate_anomaly_flag`, and `compute_alert_scenario` in `awc_pipeline_utils.py` for the exact rules.
 
+### Anomaly Surveillance (dashboard page)
+
+`awc_dashboard_streamlit.py` has a fourth tab, **Anomaly Surveillance**, alongside Overview / Geography Trends / AWC Detail - a scoped-down implementation of `dashboard_spec.md`'s Page 6, built directly against the tables above (it doesn't require the aspirational `vw_awc_anomaly_pressure` / `vw_awc_risk_overview` / `vw_awc_priority_interventions` views, which aren't implemented):
+
+- **KPI row**: AWCs shown, High Risk, New High Risk, Escalated - counted from the currently filtered `mart_awc_alerts_latest` rows.
+- **Latest Alerts table**: `mart_awc_alerts_latest`, filterable by the sidebar's District and a new Alert Scenario dropdown.
+- **Risk Level Distribution Over Time**: `fct_awc_risk_snapshot`, a stacked area chart of distinct-AWC counts per `LOW`/`MEDIUM`/`HIGH` per period, respecting the same State/District/Project/Sector/AWC filters as Geography Trends.
+- **Per-Centre Anomaly History**: `fct_awc_anomaly_flags` filtered to the sidebar's AWC Code, showing `period`, `metric_name`, `current_value`, `previous_value`, `delta_value`, `baseline_gap_value`, `threshold_value`, and `flag_reason` - the same column set as `dashboard_spec.md`'s Page 4 anomaly history, plus `threshold_value` for context.
+
+If `anomaly_risk_flags.py` has never been run against the current warehouse, this tab shows an explanatory message instead of erroring - the other three tabs are unaffected either way.
+
 ### Validated against a known-anomaly synthetic dataset
 
 `scripts/validate_anomaly_detection.py` cross-checks `fct_awc_anomaly_flags` against the synthetic generator's ground-truth injection log (`synthetic_anomaly_log.csv`) and writes a recall report. Run against the seed-42 synthetic dataset:
@@ -171,6 +182,14 @@ python -m pytest tests/
 ```
 
 `tests/` covers flag-rule boundary values (e.g. 79.9 vs 80.0 measuring efficiency), risk-level aggregation (0/1/3 flags), `alert_scenario` transitions, and one end-to-end test running a tiny in-memory fixture through `compute_anomaly_flags` / `compute_risk_snapshot` / `compute_alerts_latest`. No real or synthetic data files are required to run it.
+
+## Dashboard Backend
+
+`awc_dashboard_streamlit.py` picks its backend at startup: if the `DATABASE_URL` environment variable is set, it queries Postgres (e.g. a Neon database) via `psycopg2`; otherwise it falls back to the local `awc_warehouse.sqlite`. Every page - including Anomaly Surveillance - works identically on both; SQL is written portably (no SQLite-only `strftime`/`substr`, dialect differences like `LIKE` vs `ILIKE` are chosen automatically) rather than branching per page.
+
+The database connection is cached with `st.cache_resource` (a 15-minute TTL) and query results with `st.cache_data` (5 minutes), so a Neon compute that's scaled to zero only pays its cold-start cost once per cache window, not on every filter click - Streamlit reruns the whole script on every widget interaction. A dropped/expired connection triggers one automatic reconnect-and-retry.
+
+To load the synthetic dataset into Postgres yourself: apply `warehouse_schema_postgres.sql` and `analytics_views_postgres.sql` (the latter uses `CREATE OR REPLACE VIEW`, since Postgres doesn't support SQLite's `CREATE VIEW IF NOT EXISTS`), then run `load_awc_postgres.py --folder synthetic_data` with `DATABASE_URL` set - it applies both files and loads all four tables via `COPY`.
 
 ## Setup
 
@@ -226,8 +245,12 @@ The dashboard runs at:
   - fictional demo dataset generator
 - `scripts/validate_anomaly_detection.py`
   - validates anomaly flags against the synthetic ground-truth log
+- `load_awc_postgres.py`
+  - loads the curated Parquet output into Postgres (e.g. Neon); reads `DATABASE_URL` from the environment
+- `analytics_views_postgres.sql`
+  - Postgres-compatible `vw_awc_monthly_trends` (mirrors `analytics_views.sql`, which is SQLite-only syntax)
 - `tests/`
-  - pytest suite for the anomaly/risk/alert scoring logic
+  - pytest suite for the anomaly/risk/alert scoring logic and dashboard transform functions
 - `requirements.txt`
   - pinned Python dependencies
 
@@ -267,11 +290,11 @@ Current scope:
 
 - monthly source harmonization
 - anomaly flags, risk snapshots, and latest alerts (`anomaly_risk_flags.py`, validated against a synthetic ground-truth log - see above)
-- SQLite warehouse loading
-- dashboard reporting over recurring monthly extracts
+- SQLite or Postgres (e.g. Neon) warehouse loading, selected automatically at dashboard startup via `DATABASE_URL`
+- dashboard reporting over recurring monthly extracts, including an Anomaly Surveillance page over the anomaly/risk/alerts tables
 - source-faithful counts, coverage, and rolled-up percentages
 
 Not yet in scope:
 
-- the anomaly/risk/alerts layer is not surfaced in `awc_dashboard_streamlit.py` itself (the dashboard still reads only `fct_awc_monthly_snapshot`); the tables are populated in the warehouse and ready for a dashboard page, per `dashboard_spec.md`
-- PostgreSQL and SQL Server loaders (`load_awc_postgres.py`, `load_awc_sqlserver.py`) are wired to the restored `anomaly_frame` / `risk_frame` / `alerts_frame` functions but are untested against a live server in this environment
+- the Geography Drilldown, Priority Intervention Queue, and Trend Monitoring pages from `dashboard_spec.md` (`vw_awc_risk_overview`, `vw_awc_priority_interventions`, `vw_awc_anomaly_pressure` are not implemented as views); Anomaly Surveillance is built directly against the underlying tables instead
+- the SQL Server loader (`load_awc_sqlserver.py`) is wired to the restored `anomaly_frame` / `risk_frame` / `alerts_frame` functions but is untested against a live server in this environment (the Postgres loader has been - see Dashboard Backend, above)
