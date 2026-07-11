@@ -1,5 +1,11 @@
 # AWC Operations Dashboard
 
+[![Live Demo](https://img.shields.io/badge/demo-live-brightgreen)](https://awc-operations-dashboard.streamlit.app)
+
+**[Live demo](https://awc-operations-dashboard.streamlit.app)** - synthetic data flows through the full pipeline before reaching the dashboard: a generator (`scripts/generate_synthetic_data.py`) produces a fictional ~2,000-centre, 12-month dataset with deliberate anomalies and a distressed-centre cluster, which is harmonized across schema versions (`harmonize_merge_awc.py`), scored for anomalies/risk/alerts (`anomaly_risk_flags.py`), loaded into a Neon Postgres warehouse, and served by a dual-backend (Postgres/SQLite) Streamlit dashboard with an Anomaly Surveillance page. 75 tests pass across the scoring logic and dashboard transforms.
+
+**All data in the live demo is synthetic and fictional.** No real Anganwadi Centre, child, or Odisha administrative geography is represented - see `synthetic_data/README.md` for exactly what's synthetic and how it's generated.
+
 Local monthly monitoring pipeline and Streamlit dashboard for **AWC operational efficiency, coverage, and nutrition reporting**.
 
 This project takes raw monthly AWC CSV files, harmonizes schema differences across reporting periods, scores anomaly/risk/alert signals against the harmonized data, loads everything into a local SQLite warehouse, and serves a dashboard for operational review.
