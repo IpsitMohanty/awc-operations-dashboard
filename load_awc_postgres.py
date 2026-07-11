@@ -1,4 +1,6 @@
 import argparse
+import io
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -6,15 +8,34 @@ import pandas as pd
 from awc_pipeline_utils import resolve_folder
 from load_awc_warehouse import alerts_frame, anomaly_frame, monthly_snapshot_frame, risk_frame
 
+# Columns declared DATE in warehouse_schema_postgres.sql - pandas Timestamps are
+# formatted explicitly rather than left to COPY's date parser to guess at.
+DATE_COLUMNS = {
+    "fct_awc_monthly_snapshot": ["period"],
+    "fct_awc_anomaly_flags": ["period"],
+    "fct_awc_risk_snapshot": ["period"],
+}
+
+# Columns declared INTEGER (some nullable) in warehouse_schema_postgres.sql. Any
+# column that is None for at least one row (e.g. a centre's first-ever period
+# has no previous_risk_flag_count) gets upcast to float64 by pandas, so it
+# would otherwise serialize as "3.0" - invalid input for an INTEGER column.
+# Int64 (pandas' nullable integer dtype) keeps whole numbers whole and NaN as
+# a genuinely empty field.
+INTEGER_COLUMNS = {
+    "fct_awc_risk_snapshot": ["risk_flag_count"],
+    "mart_awc_alerts_latest": ["risk_flag_count", "previous_risk_flag_count", "recent_anomaly_count"],
+}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Load AWC curated outputs into PostgreSQL.")
     parser.add_argument("--folder", default=None, help="Folder containing curated AWC outputs.")
-    parser.add_argument("--host", required=True, help="PostgreSQL host.")
+    parser.add_argument("--host", default=None, help="PostgreSQL host. Overrides DATABASE_URL if set together with --database/--user/--password.")
     parser.add_argument("--port", type=int, default=5432, help="PostgreSQL port.")
-    parser.add_argument("--database", required=True, help="PostgreSQL database name.")
-    parser.add_argument("--user", required=True, help="PostgreSQL user.")
-    parser.add_argument("--password", required=True, help="PostgreSQL password.")
+    parser.add_argument("--database", default=None, help="PostgreSQL database name.")
+    parser.add_argument("--user", default=None, help="PostgreSQL user.")
+    parser.add_argument("--password", default=None, help="PostgreSQL password.")
     parser.add_argument("--schema", default="public", help="Target PostgreSQL schema.")
     parser.add_argument(
         "--create-tables-sql",
@@ -22,6 +43,22 @@ def parse_args() -> argparse.Namespace:
         help="Name or path of the PostgreSQL DDL file.",
     )
     return parser.parse_args()
+
+
+def resolve_connection_string(args: argparse.Namespace) -> str:
+    """CLI connection args, if all four are supplied, override the environment.
+    Otherwise fall back to DATABASE_URL (e.g. a Neon connection string)."""
+    if args.host and args.database and args.user and args.password:
+        return f"host={args.host} port={args.port} dbname={args.database} user={args.user} password={args.password}"
+
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        raise RuntimeError(
+            "No PostgreSQL connection info available. Either pass "
+            "--host/--database/--user/--password together, or set the "
+            "DATABASE_URL environment variable."
+        )
+    return database_url
 
 
 def resolve_output_path(folder: Path, value: str) -> Path:
@@ -48,23 +85,45 @@ def load_parquet_frames(folder: Path) -> dict[str, pd.DataFrame]:
     }
 
 
+def prepare_for_copy(table_name: str, df: pd.DataFrame) -> pd.DataFrame:
+    """Coerce dtypes that pandas' default to_csv output would round-trip
+    incorrectly through Postgres COPY (dates left as datetime, nullable
+    integers upcast to float64)."""
+    df = df.copy()
+    for col in DATE_COLUMNS.get(table_name, []):
+        df[col] = pd.to_datetime(df[col]).dt.strftime("%Y-%m-%d")
+    for col in INTEGER_COLUMNS.get(table_name, []):
+        df[col] = df[col].astype("Int64")
+    return df
+
+
+def copy_dataframe(cur, schema: str, table_name: str, df: pd.DataFrame) -> None:
+    df = prepare_for_copy(table_name, df)
+    buffer = io.StringIO()
+    df.to_csv(buffer, index=False, header=False)
+    buffer.seek(0)
+    columns = ", ".join(df.columns)
+    cur.copy_expert(
+        f"COPY {schema}.{table_name} ({columns}) FROM STDIN WITH (FORMAT CSV)",
+        buffer,
+    )
+
+
 def main() -> None:
     args = parse_args()
     folder = resolve_folder(args.folder)
     ddl_file = resolve_output_path(folder, args.create_tables_sql)
 
     try:
-        import psycopg
+        import psycopg2
     except ImportError as exc:
-        raise RuntimeError("psycopg is required to load into PostgreSQL. Install it with `pip install psycopg[binary]`.") from exc
+        raise RuntimeError("psycopg2 is required to load into PostgreSQL. Install it with `pip install psycopg2-binary`.") from exc
 
     frames = load_parquet_frames(folder)
-    conn_str = (
-        f"host={args.host} port={args.port} dbname={args.database} "
-        f"user={args.user} password={args.password}"
-    )
+    dsn = resolve_connection_string(args)
 
-    with psycopg.connect(conn_str) as conn:
+    conn = psycopg2.connect(dsn)
+    try:
         with conn.cursor() as cur:
             if ddl_file.exists():
                 ddl_sql = ddl_file.read_text(encoding="utf-8").replace("__SCHEMA__", args.schema)
@@ -75,14 +134,13 @@ def main() -> None:
                 cur.execute(f"TRUNCATE TABLE {args.schema}.{table_name};")
 
             for table_name, df in frames.items():
-                columns = list(df.columns)
-                quoted_cols = ", ".join(columns)
-                with cur.copy(
-                    f"COPY {args.schema}.{table_name} ({quoted_cols}) FROM STDIN WITH (FORMAT CSV)"
-                ) as copy:
-                    for row in df.itertuples(index=False, name=None):
-                        copy.write_row(row)
+                copy_dataframe(cur, args.schema, table_name, df)
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
     print("PostgreSQL warehouse load completed.")
     for table_name, df in frames.items():
